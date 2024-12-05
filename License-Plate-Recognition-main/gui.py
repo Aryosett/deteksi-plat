@@ -2,6 +2,10 @@ import streamlit as st
 import os
 import subprocess
 import time
+import cv2
+import numpy as np
+import pytesseract
+import re
 
 # Pengaturan Layout dan Tampilan Aplikasi
 st.set_page_config(page_title="Aplikasi Deteksi Plat Nomor", page_icon=":car:", layout="centered")
@@ -48,50 +52,68 @@ st.markdown("""
 
 # Header dan Deskripsi Aplikasi
 st.markdown("<h1 class='title'>Aplikasi Deteksi Plat Nomor</h1>", unsafe_allow_html=True)
-st.markdown("<p class='description'>Gunakan aplikasi ini untuk mendeteksi plat nomor kendaraan secara otomatis.<br>NOTE: Ketik S untuk Deteksi dan Q untuk mengakhiri</p>", unsafe_allow_html=True)
+st.markdown("<p class='description'>Gunakan aplikasi ini untuk mendeteksi plat nomor kendaraan secara otomatis.<br>NOTE: Ambil gambar dengan kamera dan klik 'Deteksi'</p>", unsafe_allow_html=True)
 
-# Tombol untuk memulai deteksi
-if st.button("Mulai Deteksi", key="start_detection", help="Klik untuk mulai deteksi plat nomor"):
-    with st.spinner("Sedang mendeteksi plat nomor..."):
-        # Menjalankan main.py menggunakan subprocess
-        result = subprocess.run(['python', 'test1.py'], capture_output=True, text=True)
-        
-        # Menunggu sebentar hingga deteksi selesai
-        time.sleep(5)  # Tunggu selama 5 detik sebelum memuat hasil
+# Fungsi deteksi plat nomor
+def detect_plate_from_image(image):
+    # Konfigurasi Tesseract OCR
+    pytesseract.pytesseract.tesseract_cmd = "c:/Program Files/Tesseract-OCR/tesseract.exe"
 
-        # Menampilkan hasil deteksi
-        output_folder = "hasil"
-        
-        # Daftar file dan caption sesuai urutan yang diinginkan
-        images = [
-            ("result_1_resized.png", "Resize"),
-            ("result_1_gray.png", "Konversi ke Grayscale"),
-            ("result_1_inverted.png", "Menginvert Gambar"),
-            ("result_1_thresh.png", "Tresholding"),
-            ("result_1_morph.png", "Transformasi Morph"),
-            ("result_1_detected.png", "Hasil")
-        ]
+    # Muat classifier untuk mendeteksi plat nomor
+    cascade = cv2.CascadeClassifier("haarcascade_russian_plate_number.xml")
 
-        # Menampilkan gambar secara urut
-        for file_name, caption in images:
-            file_path = os.path.join(output_folder, file_name)
-            if os.path.exists(file_path):
-                st.image(file_path, caption=caption, use_container_width=True)
+    # Konversi gambar menjadi array NumPy
+    image_np = np.array(image)
+    gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
+    nplate = cascade.detectMultiScale(gray, 1.1, 4)
+    detected_plate = None  # Menyimpan gambar plat untuk deteksi lebih lanjut
+    plate_coords = None
 
-        # Menampilkan output dari subprocess jika ada
-        if result.stdout:
-            # Memastikan hanya "Isi Plat Nomor" yang ditampilkan
-            lines = result.stdout.splitlines()
-            plat_nomor = ""
-            for line in lines:
-                if "Isi plat nomor:" in line:
-                    plat_nomor = line.split("Isi plat nomor:")[1].strip()  # Menarik isi plat nomor
-                    break
+    for (x, y, w, h) in nplate:
+        # Tambahkan margin pada plat nomor
+        wT, hT, _ = image_np.shape
+        a, b = (int(0.02 * wT), int(0.02 * hT))
+        detected_plate = image_np[y + a:y + h - a, x + b:x + w - b, :]
+        plate_coords = (x, y, w, h)
 
-            # Menampilkan hanya Isi Plat Nomor jika ditemukan
-            if plat_nomor:
-                st.write(f"**Isi Plat Nomor**: {plat_nomor}")
+        # Gambar rectangle pada frame
+        cv2.rectangle(image_np, (x, y), (x + w, y + h), (51, 51, 255), 2)
 
-        # Jika tidak ada gambar deteksi, beri pesan
-        if not any(os.path.exists(os.path.join(output_folder, img[0])) for img in images):
-            st.warning("Tidak ada hasil deteksi plat nomor.")
+    return detected_plate, image_np, plate_coords
+
+# Fungsi untuk mengekstraksi teks dari plat nomor
+def extract_text_from_plate(plate_binary):
+    custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    text = pytesseract.image_to_string(plate_binary, config=custom_config)
+    text = re.sub(r'[^A-Z0-9\s]', '', text)  # Hanya izinkan huruf besar dan angka
+    text = ' '.join(text.split())  # Hapus spasi ekstra
+    return text
+
+# Menangkap input gambar dari kamera
+image_file = st.camera_input("Ambil Gambar Plat Nomor")
+
+if image_file is not None:
+    st.image(image_file, caption="Gambar yang Diambil", use_container_width=True)
+
+    # Ketika tombol "Deteksi" ditekan
+    if st.button("Deteksi Plat Nomor"):
+        with st.spinner("Sedang mendeteksi plat nomor..."):
+            # Deteksi plat nomor dari gambar
+            detected_plate, frame_with_detection, plate_coords = detect_plate_from_image(image_file)
+
+            if detected_plate is not None:
+                # Proses gambar plat nomor (resize, grayscale, threshold, dll.)
+                plate_resized = cv2.resize(detected_plate, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
+                plate_gray = cv2.cvtColor(plate_resized, cv2.COLOR_BGR2GRAY)
+                plate_blurred = cv2.GaussianBlur(plate_gray, (5, 5), 0)
+                plate_thresh = cv2.adaptiveThreshold(plate_blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                plate_morph = cv2.morphologyEx(plate_thresh, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+                # Ekstraksi teks
+                text = extract_text_from_plate(plate_morph)
+
+                # Menampilkan hasil deteksi
+                st.image(frame_with_detection, caption="Hasil Deteksi Plat Nomor", use_container_width=True)
+                st.write(f"**Isi Plat Nomor**: {text}")
+            else:
+                st.warning("Plat nomor tidak terdeteksi!")
